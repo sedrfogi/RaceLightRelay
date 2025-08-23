@@ -1,64 +1,76 @@
 import asyncio
 import websockets
 import json
-from random import randint
+import random
+from collections import defaultdict
 
-# Keep track of all connected clients
-connected_clients = set()
+rooms = defaultdict(set)  # room_name -> set of websockets
+user_rooms = {}  # websocket -> room_name
 
-# Current countdown state
-current_state = {
-    "status": "waiting",  # can be "waiting", "be_ready", "green"
-    "countdown": 10
-}
+async def notify_room(room_name, message):
+    if room_name in rooms:
+        for ws in rooms[room_name]:
+            try:
+                await ws.send(json.dumps(message))
+            except:
+                pass
 
-async def broadcast(message):
-    if connected_clients:
-        await asyncio.wait([client.send(message) for client in connected_clients])
-
-async def race_light_cycle():
-    while True:
-        # Wait until at least 2 clients are connected
-        while len(connected_clients) < 2:
-            current_state["status"] = "waiting"
-            current_state["countdown"] = 10
+async def light_cycle(room_name):
+    while rooms[room_name]:
+        countdown = 10
+        # Countdown
+        for i in range(countdown, 0, -1):
+            await notify_room(room_name, {"type": "countdown", "value": i})
             await asyncio.sleep(1)
-
-        # Countdown phase
-        current_state["status"] = "countdown"
-        for i in range(10, 0, -1):
-            current_state["countdown"] = i
-            await broadcast(json.dumps(current_state))
-            await asyncio.sleep(1)
-
         # Be Ready
-        current_state["status"] = "be_ready"
-        current_state["countdown"] = 0
-        await broadcast(json.dumps(current_state))
-        await asyncio.sleep(randint(1, 10))  # random delay
-
+        await notify_room(room_name, {"type": "be_ready"})
+        delay = random.randint(1, 10)
+        await asyncio.sleep(delay)
         # Green light
-        current_state["status"] = "green"
-        await broadcast(json.dumps(current_state))
-        await asyncio.sleep(3)  # green light duration
+        await notify_room(room_name, {"type": "green"})
+        await asyncio.sleep(3)
 
-async def handler(websocket):
-    # Add new client
-    connected_clients.add(websocket)
-
-    # Send current state immediately so late joiners sync
-    await websocket.send(json.dumps(current_state))
-
+async def handler(websocket, path):
+    room_task = None
     try:
-        async for message in websocket:
-            pass  # We don't expect messages from clients
+        async for msg in websocket:
+            data = json.loads(msg)
+            action = data.get("action")
+
+            if action == "create_room":
+                room_name = f"room{len(rooms)+1}"
+                rooms[room_name].add(websocket)
+                user_rooms[websocket] = room_name
+                await websocket.send(json.dumps({"type": "room_joined", "room": room_name}))
+                # Start light cycle for the room
+                if room_name not in asyncio.all_tasks():
+                    room_task = asyncio.create_task(light_cycle(room_name))
+
+            elif action == "join_room":
+                if rooms:
+                    room_name = next(iter(rooms))
+                    rooms[room_name].add(websocket)
+                    user_rooms[websocket] = room_name
+                    await websocket.send(json.dumps({"type": "room_joined", "room": room_name}))
+
+    except websockets.ConnectionClosed:
+        pass
     finally:
-        # Remove client on disconnect
-        connected_clients.remove(websocket)
+        # Remove from room
+        room_name = user_rooms.get(websocket)
+        if room_name and websocket in rooms[room_name]:
+            rooms[room_name].remove(websocket)
+            if not rooms[room_name]:
+                del rooms[room_name]
+        if websocket in user_rooms:
+            del user_rooms[websocket]
+        if room_task:
+            room_task.cancel()
 
 async def main():
-    server = await websockets.serve(handler, "0.0.0.0", 8080)
-    await race_light_cycle()  # run race light cycle forever
+    async with websockets.serve(handler, "0.0.0.0", 8080):
+        print("Relay server running on ws://0.0.0.0:8080")
+        await asyncio.Future()  # run forever
 
 if __name__ == "__main__":
     asyncio.run(main())
