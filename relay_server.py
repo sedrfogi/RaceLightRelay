@@ -1,61 +1,64 @@
 import asyncio
 import websockets
 import json
-from collections import defaultdict
-import random
+from random import randint
 
-ROOMS = defaultdict(set)  # room_name -> set of websockets
+# Keep track of all connected clients
+connected_clients = set()
 
-async def broadcast(room, message):
-    """Send a message to all clients in the room."""
-    if room in ROOMS:
-        websockets_to_remove = set()
-        for ws in ROOMS[room]:
-            try:
-                await ws.send(json.dumps(message))
-            except:
-                websockets_to_remove.add(ws)
-        ROOMS[room] -= websockets_to_remove
+# Current countdown state
+current_state = {
+    "status": "waiting",  # can be "waiting", "be_ready", "green"
+    "countdown": 10
+}
 
-async def run_race(room):
-    """Run the race light sequence for a room."""
-    countdown = 10
+async def broadcast(message):
+    if connected_clients:
+        await asyncio.wait([client.send(message) for client in connected_clients])
+
+async def race_light_cycle():
     while True:
-        for i in range(countdown, 0, -1):
-            await broadcast(room, {"type": "countdown", "value": i})
+        # Wait until at least 2 clients are connected
+        while len(connected_clients) < 2:
+            current_state["status"] = "waiting"
+            current_state["countdown"] = 10
             await asyncio.sleep(1)
-        await broadcast(room, {"type": "light", "color": "yellow"})
-        delay = random.randint(1, 10)
-        await asyncio.sleep(delay)
-        await broadcast(room, {"type": "light", "color": "green"})
-        await asyncio.sleep(3)
 
-async def handler(ws):
-    room_name = None
-    task = None
+        # Countdown phase
+        current_state["status"] = "countdown"
+        for i in range(10, 0, -1):
+            current_state["countdown"] = i
+            await broadcast(json.dumps(current_state))
+            await asyncio.sleep(1)
+
+        # Be Ready
+        current_state["status"] = "be_ready"
+        current_state["countdown"] = 0
+        await broadcast(json.dumps(current_state))
+        await asyncio.sleep(randint(1, 10))  # random delay
+
+        # Green light
+        current_state["status"] = "green"
+        await broadcast(json.dumps(current_state))
+        await asyncio.sleep(3)  # green light duration
+
+async def handler(websocket):
+    # Add new client
+    connected_clients.add(websocket)
+
+    # Send current state immediately so late joiners sync
+    await websocket.send(json.dumps(current_state))
+
     try:
-        async for msg in ws:
-            data = json.loads(msg)
-            action = data.get("action")
-            if action in ("create", "join"):
-                room_name = data["room"]
-                ROOMS[room_name].add(ws)
-                # Start race if first player
-                if len(ROOMS[room_name]) == 1:
-                    task = asyncio.create_task(run_race(room_name))
-            # Handle other actions if needed
-    except websockets.ConnectionClosed:
-        pass
+        async for message in websocket:
+            pass  # We don't expect messages from clients
     finally:
-        if room_name:
-            ROOMS[room_name].discard(ws)
-            # Cancel race if no players left
-            if not ROOMS[room_name] and task:
-                task.cancel()
+        # Remove client on disconnect
+        connected_clients.remove(websocket)
 
 async def main():
-    async with websockets.serve(handler, "0.0.0.0", 8080, path="/ws"):
-        await asyncio.Future()  # run forever
+    server = await websockets.serve(handler, "0.0.0.0", 8080)
+    await race_light_cycle()  # run race light cycle forever
 
 if __name__ == "__main__":
     asyncio.run(main())
