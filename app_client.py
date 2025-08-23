@@ -1,28 +1,30 @@
 import tkinter as tk
-import random
+import asyncio
+import websockets
+import threading
+import json
+
+# Read server URL from config.txt
+with open("config.txt", "r") as f:
+    SERVER_URI = f.read().strip()
+
 
 class RaceLightApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Race Light")
         self.root.configure(bg="#222222")
-        self.root.attributes("-topmost", True)  # always on top
-        self.root.overrideredirect(True)  # borderless window
-        self.root.geometry("180x200")  # small compact size
-
-        self.countdown = 10
-        self.is_running = True
+        self.root.attributes("-topmost", True)
+        self.root.overrideredirect(True)
+        self.root.geometry("180x200")
 
         # Custom close/minimize buttons
         self.close_btn = tk.Button(root, text="X", command=self.root.destroy,
                                    bg="#222222", fg="white", bd=0, highlightthickness=0)
         self.min_btn = tk.Button(root, text="_", command=self.minimize,
                                  bg="#222222", fg="white", bd=0, highlightthickness=0)
-        # Initially hidden
         self.close_btn.place_forget()
         self.min_btn.place_forget()
-
-        # Show buttons on hover anywhere
         self.root.bind("<Enter>", self.show_buttons)
         self.root.bind("<Leave>", self.hide_buttons)
 
@@ -42,9 +44,6 @@ class RaceLightApp:
                                 bg="#222222", highlightthickness=0)
         self.canvas.pack(pady=10)
         self.circle = self.canvas.create_oval(10, 10, 90, 90, fill="grey")
-
-        # Start the loop automatically
-        self.loop_cycle()
 
     # Hover functions
     def show_buttons(self, event=None):
@@ -69,33 +68,42 @@ class RaceLightApp:
     def minimize(self):
         self.root.iconify()
 
-    # Main loop
-    def loop_cycle(self):
-        self.countdown = 10
-        self.text_label.config(text=f"Next light {self.countdown}")
-        self.canvas.itemconfig(self.circle, fill="grey")
-        self.countdown_step()
-
-    def countdown_step(self):
-        if self.countdown > 0:
-            self.countdown -= 1
-            self.text_label.config(text=f"Next light {self.countdown}")
-            self.root.after(1000, self.countdown_step)
-        else:
-            # Be Ready
+    # Update GUI based on server message
+    def handle_server_message(self, data):
+        if data["type"] == "countdown":
+            self.text_label.config(text=f"Next light {data['seconds']}")
+            self.canvas.itemconfig(self.circle, fill="grey")
+        elif data["type"] == "be_ready":
             self.text_label.config(text="Be Ready")
             self.canvas.itemconfig(self.circle, fill="yellow")
-            delay = random.randint(1000, 10000)
-            self.root.after(delay, self.show_green)
+        elif data["type"] == "green":
+            self.text_label.config(text="")
+            self.canvas.itemconfig(self.circle, fill="green")
+        elif data["type"] == "info":
+            print(data["text"])  # optional info logging
 
-    def show_green(self):
-        self.text_label.config(text="")
-        self.canvas.itemconfig(self.circle, fill="green")
-        self.root.after(3000, self.loop_cycle)
+# Async connection to relay server
+async def connect_to_server(app, room_code):
+    async with websockets.connect(SERVER_URI) as websocket:
+        # Send join room message
+        await websocket.send(json.dumps({"action": "join", "room": room_code}))
+
+        while True:
+            message = await websocket.recv()
+            data = json.loads(message)
+            # Update GUI in main thread
+            app.root.after(0, app.handle_server_message, data)
+
+# Start asyncio in a thread
+def start_async_loop(app, room_code):
+    asyncio.new_event_loop().run_until_complete(connect_to_server(app, room_code))
 
 def main():
+    room_code = input("Enter 4-digit room code: ")  # could replace with GUI input later
     root = tk.Tk()
     app = RaceLightApp(root)
+
+    threading.Thread(target=start_async_loop, args=(app, room_code), daemon=True).start()
     root.mainloop()
 
 if __name__ == "__main__":
