@@ -1,76 +1,42 @@
 import asyncio
 import websockets
-import json
-from collections import defaultdict
-import random
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
 
-# Keep track of rooms and connected clients
-rooms = defaultdict(set)  # {room_code: set(websocket, ...)}
+# --- CONFIG ---
+WS_PORT = 8765  # WebSocket port
+HTTP_PORT = 8766  # HTTP health check port
 
-async def broadcast(room_code, message):
-    """Send message to all clients in the room."""
-    if room_code in rooms:
-        websockets_in_room = rooms[room_code].copy()
-        for ws in websockets_in_room:
-            try:
-                await ws.send(message)
-            except:
-                rooms[room_code].discard(ws)
+# --- WebSocket handler ---
+connected_clients = set()
 
-async def handle_client(websocket, path):
-    room_code = None
+async def ws_handler(websocket, path):
+    connected_clients.add(websocket)
     try:
         async for message in websocket:
-            data = json.loads(message)
-
-            if data["action"] == "join":
-                room_code = data["room"]
-                rooms[room_code].add(websocket)
-
-                await broadcast(room_code, json.dumps({
-                    "type": "info",
-                    "text": f"A player joined room {room_code}. Players: {len(rooms[room_code])}"
-                }))
-
-                # Start green light loop if this is first player
-                if not any(task for task in asyncio.all_tasks() if task.get_name() == f"room_{room_code}"):
-                    asyncio.create_task(schedule_green_light(room_code), name=f"room_{room_code}")
-
-    except websockets.exceptions.ConnectionClosed:
-        pass
+            # echo back or handle messages here
+            await websocket.send(message)
     finally:
-        if room_code:
-            rooms[room_code].discard(websocket)
-            await broadcast(room_code, json.dumps({
-                "type": "info",
-                "text": f"A player left room {room_code}. Players: {len(rooms[room_code])}"
-            }))
+        connected_clients.remove(websocket)
 
-async def schedule_green_light(room_code):
-    """Continuously send countdown and green light for a room."""
-    while rooms[room_code]:
-        # Countdown phase
-        countdown = 10
-        while countdown > 0:
-            await broadcast(room_code, json.dumps({"type": "countdown", "seconds": countdown}))
-            await asyncio.sleep(1)
-            countdown -= 1
+# --- HTTP health check ---
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
 
-        # Be ready phase
-        await broadcast(room_code, json.dumps({"type": "be_ready"}))
+def run_http_server():
+    server = HTTPServer(('0.0.0.0', HTTP_PORT), HealthHandler)
+    print(f"HTTP health check server running on port {HTTP_PORT}")
+    server.serve_forever()
 
-        # Random delay 1-10 seconds
-        delay = random.randint(1, 10)
-        await asyncio.sleep(delay)
+# --- START SERVERS ---
+# Start HTTP health server in a separate thread
+threading.Thread(target=run_http_server, daemon=True).start()
 
-        # Show green light for 3 seconds
-        await broadcast(room_code, json.dumps({"type": "green"}))
-        await asyncio.sleep(3)
-
-async def main():
-    async with websockets.serve(handle_client, "0.0.0.0", 8765):
-        print("Relay server running on port 8765")
-        await asyncio.Future()  # run forever
-
-if __name__ == "__main__":
-    asyncio.run(main())
+# Start WebSocket server
+start_server = websockets.serve(ws_handler, "0.0.0.0", WS_PORT)
+asyncio.get_event_loop().run_until_complete(start_server)
+print(f"WebSocket server running on port {WS_PORT}")
+asyncio.get_event_loop().run_forever()
