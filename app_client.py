@@ -1,5 +1,8 @@
 import tkinter as tk
-import random
+import asyncio
+import websockets
+import json
+import threading
 
 # Read server URL from local config.txt
 with open("config.txt", "r") as f:
@@ -10,14 +13,14 @@ class RaceLightApp:
         self.root = root
         self.root.title("Race Light")
         self.root.configure(bg="#222222")
-        self.root.attributes("-topmost", True)  # always on top
-        self.root.overrideredirect(True)  # borderless window
-        self.root.geometry("180x200")  # small compact size
+        self.root.attributes("-topmost", True)
+        self.root.overrideredirect(True)
+        self.root.geometry("180x200")
 
         self.countdown = 10
-        self.is_running = True
+        self.current_light = "grey"
 
-        # Custom close/minimize buttons
+        # Buttons
         self.close_btn = tk.Button(root, text="X", command=self.root.destroy,
                                    bg="#222222", fg="white", bd=0, highlightthickness=0)
         self.min_btn = tk.Button(root, text="_", command=self.minimize,
@@ -25,29 +28,27 @@ class RaceLightApp:
         self.close_btn.place_forget()
         self.min_btn.place_forget()
 
-        # Show buttons on hover anywhere
         self.root.bind("<Enter>", self.show_buttons)
         self.root.bind("<Leave>", self.hide_buttons)
 
-        # Drag window
+        # Drag
         self.root.bind("<Button-1>", self.click_window)
         self.root.bind("<B1-Motion>", self.move_window)
         self.offset_x = 0
         self.offset_y = 0
 
-        # Label for countdown / Be Ready
+        # Label and canvas
         self.text_label = tk.Label(root, text="", font=("Arial", 18),
                                    fg="white", bg="#222222")
         self.text_label.pack(pady=10)
 
-        # Canvas for circle
         self.canvas = tk.Canvas(root, width=100, height=100,
                                 bg="#222222", highlightthickness=0)
         self.canvas.pack(pady=10)
         self.circle = self.canvas.create_oval(10, 10, 90, 90, fill="grey")
 
-        # Start the loop automatically
-        self.loop_cycle()
+        # Start WebSocket in separate thread
+        threading.Thread(target=self.start_ws_loop, daemon=True).start()
 
     # Hover functions
     def show_buttons(self, event=None):
@@ -72,29 +73,29 @@ class RaceLightApp:
     def minimize(self):
         self.root.iconify()
 
-    # Main loop
-    def loop_cycle(self):
-        self.countdown = 10
-        self.text_label.config(text=f"Next light {self.countdown}")
-        self.canvas.itemconfig(self.circle, fill="grey")
-        self.countdown_step()
+    # Update light based on server message
+    def update_light(self, color, text=""):
+        self.current_light = color
+        self.canvas.itemconfig(self.circle, fill=color)
+        self.text_label.config(text=text)
 
-    def countdown_step(self):
-        if self.countdown > 0:
-            self.countdown -= 1
-            self.text_label.config(text=f"Next light {self.countdown}")
-            self.root.after(1000, self.countdown_step)
-        else:
-            # Be Ready
-            self.text_label.config(text="Be Ready")
-            self.canvas.itemconfig(self.circle, fill="yellow")
-            delay = random.randint(1000, 10000)
-            self.root.after(delay, self.show_green)
+    # Start asyncio loop for WebSocket
+    def start_ws_loop(self):
+        asyncio.run(self.ws_loop())
 
-    def show_green(self):
-        self.text_label.config(text="")
-        self.canvas.itemconfig(self.circle, fill="green")
-        self.root.after(3000, self.loop_cycle)
+    async def ws_loop(self):
+        async with websockets.connect(SERVER_URL) as websocket:
+            while True:
+                try:
+                    message = await websocket.recv()
+                    data = json.loads(message)
+                    color = data.get("color", "grey")
+                    text = data.get("text", "")
+                    # Schedule the update on the Tkinter main thread
+                    self.root.after(0, self.update_light, color, text)
+                except Exception as e:
+                    print("WebSocket error:", e)
+                    break
 
 def main():
     root = tk.Tk()
