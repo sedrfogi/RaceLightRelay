@@ -1,14 +1,13 @@
 import tkinter as tk
-import random
 import asyncio
+import threading
+import json
+import random
 import websockets
 
-# Read server URL from local config.txt
+# Read server URL from config.txt
 with open("config.txt", "r") as f:
     SERVER_URL = f.read().strip()
-
-# Add WebSocket path
-WS_URL = f"{SERVER_URL}/ws"
 
 class RaceLightApp:
     def __init__(self, root):
@@ -16,103 +15,74 @@ class RaceLightApp:
         self.root.title("Race Light")
         self.root.configure(bg="#222222")
         self.root.attributes("-topmost", True)
-        self.root.overrideredirect(True)
-        self.root.geometry("180x200")
+        self.root.geometry("250x300")
 
-        self.countdown = 10
-        self.is_running = True
+        self.room_name = tk.StringVar()
 
-        # Close/minimize buttons
-        self.close_btn = tk.Button(root, text="X", command=self.root.destroy,
-                                   bg="#222222", fg="white", bd=0, highlightthickness=0)
-        self.min_btn = tk.Button(root, text="_", command=self.minimize,
-                                 bg="#222222", fg="white", bd=0, highlightthickness=0)
-        self.close_btn.place_forget()
-        self.min_btn.place_forget()
+        # Room entry
+        tk.Label(root, text="Room Name:", fg="white", bg="#222222").pack(pady=5)
+        self.room_entry = tk.Entry(root, textvariable=self.room_name)
+        self.room_entry.pack()
 
-        # Show buttons on hover
-        self.root.bind("<Enter>", self.show_buttons)
-        self.root.bind("<Leave>", self.hide_buttons)
+        # Buttons
+        self.create_btn = tk.Button(root, text="Create Room", command=self.create_room)
+        self.create_btn.pack(pady=5)
+        self.join_btn = tk.Button(root, text="Join Room", command=self.join_room)
+        self.join_btn.pack(pady=5)
 
-        # Drag window
-        self.root.bind("<Button-1>", self.click_window)
-        self.root.bind("<B1-Motion>", self.move_window)
-        self.offset_x = 0
-        self.offset_y = 0
-
-        # Label for countdown / Be Ready
-        self.text_label = tk.Label(root, text="", font=("Arial", 18),
-                                   fg="white", bg="#222222")
+        # Countdown label & circle
+        self.text_label = tk.Label(root, text="", font=("Arial", 18), fg="white", bg="#222222")
         self.text_label.pack(pady=10)
 
-        # Canvas for circle
-        self.canvas = tk.Canvas(root, width=100, height=100,
-                                bg="#222222", highlightthickness=0)
+        self.canvas = tk.Canvas(root, width=100, height=100, bg="#222222", highlightthickness=0)
         self.canvas.pack(pady=10)
         self.circle = self.canvas.create_oval(10, 10, 90, 90, fill="grey")
 
-        # Start WebSocket connection
-        asyncio.get_event_loop().run_until_complete(self.start_ws())
+        # WebSocket
+        self.ws = None
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self.loop.run_forever, daemon=True).start()
 
-        # Start the loop automatically
-        self.loop_cycle()
+    # WebSocket helpers
+    async def connect_ws(self):
+        async with websockets.connect(SERVER_URL) as websocket:
+            self.ws = websocket
+            await self.listen_ws()
 
-    # Hover functions
-    def show_buttons(self, event=None):
-        self.close_btn.place(x=150, y=0, width=30, height=20)
-        self.min_btn.place(x=120, y=0, width=30, height=20)
+    async def listen_ws(self):
+        async for message in self.ws:
+            data = json.loads(message)
+            if data["type"] == "countdown":
+                self.update_countdown(data["value"])
+            elif data["type"] == "light":
+                self.update_light(data["color"])
 
-    def hide_buttons(self, event=None):
-        self.close_btn.place_forget()
-        self.min_btn.place_forget()
+    def start_ws_thread(self):
+        asyncio.run_coroutine_threadsafe(self.connect_ws(), self.loop)
 
-    # Drag functions
-    def click_window(self, event):
-        self.offset_x = event.x
-        self.offset_y = event.y
+    # Room actions
+    def create_room(self):
+        room = self.room_name.get()
+        if room:
+            asyncio.run_coroutine_threadsafe(self.send_ws({"action": "create", "room": room}), self.loop)
+            self.start_ws_thread()
 
-    def move_window(self, event):
-        x = event.x_root - self.offset_x
-        y = event.y_root - self.offset_y
-        self.root.geometry(f"+{x}+{y}")
+    def join_room(self):
+        room = self.room_name.get()
+        if room:
+            asyncio.run_coroutine_threadsafe(self.send_ws({"action": "join", "room": room}), self.loop)
+            self.start_ws_thread()
 
-    # Minimize
-    def minimize(self):
-        self.root.iconify()
+    async def send_ws(self, message):
+        if self.ws:
+            await self.ws.send(json.dumps(message))
 
-    # Main loop
-    def loop_cycle(self):
-        self.countdown = 10
-        self.text_label.config(text=f"Next light {self.countdown}")
-        self.canvas.itemconfig(self.circle, fill="grey")
-        self.countdown_step()
+    # Update GUI
+    def update_countdown(self, value):
+        self.text_label.config(text=f"Next light {value}")
 
-    def countdown_step(self):
-        if self.countdown > 0:
-            self.countdown -= 1
-            self.text_label.config(text=f"Next light {self.countdown}")
-            self.root.after(1000, self.countdown_step)
-        else:
-            self.text_label.config(text="Be Ready")
-            self.canvas.itemconfig(self.circle, fill="yellow")
-            delay = random.randint(1000, 10000)
-            self.root.after(delay, self.show_green)
-
-    def show_green(self):
-        self.text_label.config(text="")
-        self.canvas.itemconfig(self.circle, fill="green")
-        self.root.after(3000, self.loop_cycle)
-
-    # WebSocket connection
-    async def start_ws(self):
-        try:
-            async with websockets.connect(WS_URL) as websocket:
-                while True:
-                    message = await websocket.recv()
-                    # Example: handle messages from server if needed
-                    print("Received from server:", message)
-        except Exception as e:
-            print("WebSocket error:", e)
+    def update_light(self, color):
+        self.canvas.itemconfig(self.circle, fill=color)
 
 def main():
     root = tk.Tk()

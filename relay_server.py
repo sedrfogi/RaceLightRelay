@@ -1,49 +1,61 @@
-# relay_server.py
-from fastapi import FastAPI, WebSocket
-from fastapi.middleware.cors import CORSMiddleware
 import asyncio
+import websockets
+import json
+from collections import defaultdict
+import random
 
-app = FastAPI()
+ROOMS = defaultdict(set)  # room_name -> set of websockets
 
-# Allow all origins so your clients can connect
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+async def broadcast(room, message):
+    """Send a message to all clients in the room."""
+    if room in ROOMS:
+        websockets_to_remove = set()
+        for ws in ROOMS[room]:
+            try:
+                await ws.send(json.dumps(message))
+            except:
+                websockets_to_remove.add(ws)
+        ROOMS[room] -= websockets_to_remove
 
-# Keep track of all connected clients
-connected_clients = set()
+async def run_race(room):
+    """Run the race light sequence for a room."""
+    countdown = 10
+    while True:
+        for i in range(countdown, 0, -1):
+            await broadcast(room, {"type": "countdown", "value": i})
+            await asyncio.sleep(1)
+        await broadcast(room, {"type": "light", "color": "yellow"})
+        delay = random.randint(1, 10)
+        await asyncio.sleep(delay)
+        await broadcast(room, {"type": "light", "color": "green"})
+        await asyncio.sleep(3)
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    connected_clients.add(websocket)
+async def handler(ws):
+    room_name = None
+    task = None
     try:
-        while True:
-            data = await websocket.receive_text()
-            # Broadcast the received message to all clients
-            for client in connected_clients:
-                if client != websocket:
-                    await client.send_text(data)
-    except Exception:
+        async for msg in ws:
+            data = json.loads(msg)
+            action = data.get("action")
+            if action in ("create", "join"):
+                room_name = data["room"]
+                ROOMS[room_name].add(ws)
+                # Start race if first player
+                if len(ROOMS[room_name]) == 1:
+                    task = asyncio.create_task(run_race(room_name))
+            # Handle other actions if needed
+    except websockets.ConnectionClosed:
         pass
     finally:
-        connected_clients.remove(websocket)
+        if room_name:
+            ROOMS[room_name].discard(ws)
+            # Cancel race if no players left
+            if not ROOMS[room_name] and task:
+                task.cancel()
 
-# Optional: run a periodic ping to keep connections alive
-async def ping_clients():
-    while True:
-        await asyncio.sleep(30)
-        for client in list(connected_clients):
-            try:
-                await client.send_text("ping")
-            except:
-                connected_clients.remove(client)
+async def main():
+    async with websockets.serve(handler, "0.0.0.0", 8080, path="/ws"):
+        await asyncio.Future()  # run forever
 
-# Start the ping loop in the background
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(ping_clients())
+if __name__ == "__main__":
+    asyncio.run(main())

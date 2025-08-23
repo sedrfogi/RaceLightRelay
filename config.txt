@@ -1,1 +1,1 @@
-wss://racelightrelay-production.up.railway.app
+wss://racelightrelay-production.up.railway.app/ws
