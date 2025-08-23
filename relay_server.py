@@ -1,71 +1,60 @@
 import asyncio
 import websockets
 import json
-import random
-from collections import defaultdict
 
-rooms = defaultdict(set)  # room_name -> set of websockets
-user_rooms = {}  # websocket -> room_name
+# Rooms = { room_code: set_of_clients }
+rooms = {}
 
-async def notify_room(room_name, message):
-    if room_name in rooms:
-        for ws in rooms[room_name]:
-            try:
-                await ws.send(json.dumps(message))
-            except:
-                pass
-
-async def light_cycle(room_name):
-    while rooms[room_name]:
-        countdown = 10
-        # Countdown
-        for i in range(countdown, 0, -1):
-            await notify_room(room_name, {"type": "countdown", "value": i})
-            await asyncio.sleep(1)
-        # Be Ready
-        await notify_room(room_name, {"type": "be_ready"})
-        delay = random.randint(1, 10)
-        await asyncio.sleep(delay)
-        # Green light
-        await notify_room(room_name, {"type": "green"})
-        await asyncio.sleep(3)
-
-async def handler(websocket, path):
-    room_task = None
+async def handler(websocket):
+    room_code = None
     try:
-        async for msg in websocket:
-            data = json.loads(msg)
+        async for message in websocket:
+            print("Received raw:", message)
+
+            try:
+                data = json.loads(message.replace("'", '"'))  # handle ' vs "
+            except json.JSONDecodeError:
+                await websocket.send("Invalid message format")
+                continue
+
             action = data.get("action")
+            room = data.get("room")
 
-            if action == "create_room":
-                room_name = f"room{len(rooms)+1}"
-                rooms[room_name].add(websocket)
-                user_rooms[websocket] = room_name
-                await websocket.send(json.dumps({"type": "room_joined", "room": room_name}))
-                # Start light cycle for the room
-                if room_name not in asyncio.all_tasks():
-                    room_task = asyncio.create_task(light_cycle(room_name))
+            if action == "create":
+                room_code = room
+                if room_code not in rooms:
+                    rooms[room_code] = set()
+                rooms[room_code].add(websocket)
+                await websocket.send(f"Room {room_code} created!")
+                print(f"Client created room {room_code}")
 
-            elif action == "join_room":
-                if rooms:
-                    room_name = next(iter(rooms))
-                    rooms[room_name].add(websocket)
-                    user_rooms[websocket] = room_name
-                    await websocket.send(json.dumps({"type": "room_joined", "room": room_name}))
+            elif action == "join":
+                room_code = room
+                if room_code in rooms:
+                    rooms[room_code].add(websocket)
+                    await websocket.send(f"Joined room {room_code}")
+                    print(f"Client joined room {room_code}")
+                else:
+                    await websocket.send(f"Room {room_code} does not exist.")
 
-    except websockets.ConnectionClosed:
-        pass
+            else:
+                # Broadcast message to everyone else in the same room
+                if room_code and room_code in rooms:
+                    for client in rooms[room_code]:
+                        if client != websocket:
+                            try:
+                                await client.send(message)
+                            except:
+                                pass
+    except Exception as e:
+        print("Client error:", e)
     finally:
-        # Remove from room
-        room_name = user_rooms.get(websocket)
-        if room_name and websocket in rooms[room_name]:
-            rooms[room_name].remove(websocket)
-            if not rooms[room_name]:
-                del rooms[room_name]
-        if websocket in user_rooms:
-            del user_rooms[websocket]
-        if room_task:
-            room_task.cancel()
+        # Cleanup when client disconnects
+        if room_code and room_code in rooms and websocket in rooms[room_code]:
+            rooms[room_code].remove(websocket)
+            if not rooms[room_code]:
+                del rooms[room_code]  # remove empty room
+            print(f"Client left room {room_code}")
 
 async def main():
     async with websockets.serve(handler, "0.0.0.0", 8080):
