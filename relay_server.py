@@ -1,58 +1,58 @@
-from fastapi import FastAPI, WebSocket
-from fastapi.middleware.cors import CORSMiddleware
 import asyncio
+import websockets
+import json
 import random
 
-app = FastAPI()
+PORT = 8765
 
-# Allow connections from anywhere
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# State of the race light
+state = {
+    "phase": "waiting",  # waiting, yellow, green
+    "countdown": 10
+}
 
-rooms = {}  # room_code -> set of websockets
+# Keep track of connected clients
+clients = set()
 
-@app.websocket("/ws/{room_code}")
-async def websocket_endpoint(websocket: WebSocket, room_code: str):
-    await websocket.accept()
-    if room_code not in rooms:
-        rooms[room_code] = set()
-    rooms[room_code].add(websocket)
+async def broadcast_state():
+    if clients:  # Only send if there are clients
+        message = json.dumps(state)
+        await asyncio.wait([client.send(message) for client in clients])
 
+async def countdown_loop():
+    while True:
+        if state["phase"] == "waiting":
+            state["countdown"] = 10
+            await broadcast_state()
+            await asyncio.sleep(1)
+            state["countdown"] -= 1
+            if state["countdown"] <= 0:
+                state["phase"] = "yellow"
+        elif state["phase"] == "yellow":
+            await broadcast_state()
+            delay = random.randint(1, 10)
+            await asyncio.sleep(delay)
+            state["phase"] = "green"
+        elif state["phase"] == "green":
+            await broadcast_state()
+            await asyncio.sleep(3)
+            state["phase"] = "waiting"
+
+async def handle_client(websocket, path):
+    clients.add(websocket)
     try:
-        # Start syncing only if 2 or more players are in the room
-        while True:
-            if len(rooms[room_code]) >= 2:
-                countdown = 10
-                # Send countdown
-                for ws in rooms[room_code]:
-                    await ws.send_json({"type": "countdown", "value": countdown})
-                await asyncio.sleep(1)
-                for i in range(countdown-1, 0, -1):
-                    for ws in rooms[room_code]:
-                        await ws.send_json({"type": "countdown", "value": i})
-                    await asyncio.sleep(1)
-
-                # Be Ready
-                for ws in rooms[room_code]:
-                    await ws.send_json({"type": "be_ready"})
-                
-                delay = random.randint(1, 10)
-                await asyncio.sleep(delay)
-
-                # Green light
-                for ws in rooms[room_code]:
-                    await ws.send_json({"type": "green"})
-                
-                await asyncio.sleep(3)  # green light duration
-            else:
-                await asyncio.sleep(1)
+        # Send current state immediately
+        await websocket.send(json.dumps(state))
+        async for _ in websocket:  # Keep connection open
+            pass
     except:
         pass
     finally:
-        rooms[room_code].remove(websocket)
-        if len(rooms[room_code]) == 0:
-            del rooms[room_code]
+        clients.remove(websocket)
+
+async def main():
+    server = await websockets.serve(handle_client, "0.0.0.0", PORT)
+    asyncio.create_task(countdown_loop())
+    await server.wait_closed()
+
+asyncio.run(main())
