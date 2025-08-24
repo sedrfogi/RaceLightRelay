@@ -5,16 +5,8 @@ from tkinter import simpledialog
 import websockets
 import time
 
-def load_config():
-    try:
-        with open("config.txt", "r") as f:
-            for line in f:
-                if line.startswith("SERVER_URL="):
-                    return line.strip().split("=", 1)[1]
-    except FileNotFoundError:
-        return "wss://racelightrelay-production.up.railway.app"
-SERVER_URL = load_config()
-
+# Hard-coded server URL for single .exe
+SERVER_URL = "wss://racelightrelay-production.up.railway.app"
 
 class RaceLightApp:
     def __init__(self, root):
