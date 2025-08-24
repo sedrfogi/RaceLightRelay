@@ -1,1 +1,1 @@
-wss://racelightrelay-production.up.railway.app
+SERVER_URL=wss://racelightrelay-production.up.railway.app
